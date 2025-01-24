@@ -84,9 +84,10 @@ class StanleyController():
         self.target_y = 0
         self.last_x = 0
         self.last_y = 0
-        self.xt_err_corr
-        self.k = 0.6                        #0.4
-        self.Kp = 1.5                       #1.0
+        self.prev_target_index = 0
+        self.prev_pos_fr = [0, 0]
+        #self.xt_err_corr
+        self.k = 0.3                        #0.4
         self.v = 1                       #1.5
         self.k_s = 0.5                        #1
         #self.dt = 0.1                       #0.1
@@ -106,15 +107,8 @@ class StanleyController():
     
     #Function to normalize angles between -pi and pi    
     def normalize(self, input):
-        if input > np.pi:
-            return np.pi
-        
-        elif input < -np.pi:
-            return -np.pi
-        else:
-            return input
+        return (input + np.pi) % (2 * np.pi) - np.pi
     
-
     def get_gps_trace(self):
         return data
 
@@ -131,43 +125,61 @@ class StanleyController():
         return np.array(yaws)
     
     #Finding the closest track point to the robot
-    def get_target_location(self,x, y):
-        i = 0
-        min_dist = 100000000
-        for i in range(len(data)):
-            current_min_dist = math.dist(data[i], [x, y])
+    #(front axle x, front axle y, path x, path y)
+    def get_target_location(self,fx, fy, px, py):
+        
+        dx = fx - px    # Find the x-axis of the front axle relative to the path
+        dy = fy - py    # Find the y-axis of the front axle relative to the path
+        
+        d = np.hypot(dx, dy) # Find the distance from the front axle to the path
+        target_index = np.argmin(d) # Find the shortest distance in the array
+        
+        if target_index < self.prev_target_index:  # Prevent backtracking
+            target_index = self.prev_target_index
 
-            if current_min_dist < min_dist:
-                min_dist = current_min_dist
-                min_dist_idx = i
+        return [target_index, dx[target_index], dy[target_index], d[target_index]]
 
-        return [data[min_dist_idx], data[min_dist_idx - 1], min_dist_idx, min_dist]
-    
+
+
     def heading_error(self, yaw, path_yaw):
-        yaw_diff = path_yaw - yaw
-        
-        return self.normalize(yaw_diff)
+        # yaw error between robot and path
+        # Return normalized angle between [-pi, pi]
+        error = np.arctan2(np.sin(path_yaw - yaw), np.cos(path_yaw - yaw))
+        return error
 
-    def xt_error(self, current_position, closest_point, closest_point_distance): # The cross-track error is the distance between the vehicle and the ideal trajectory
-        #Cross track error can be calculated as the distance of the point closest to the front axle
-        xte_yaw = self.normalize(np.arctan2(current_position[1] - closest_point[1], current_position[0], closest_point[0]))
-        
-        xte = np.sign(xte_yaw) * closest_point_distance      #If the robot is to the right or to the left of the path.
+    def xt_error(self, yaw, dx, dy, abs_distance): # The cross-track error is the distance between the vehicle and the ideal trajectory
+        # Calculates cross-track steering error (lateral error)
 
-        #Not using speed coefficient
-        return np.arctan2(self.k * xte)
+        # Direction of robots front axle
+        front_axle_vector = np.array([np.sin(yaw), -np.cos(yaw)])
+
+        # Vector from robots front axle to nearest point
+        nearest_path_vector = np.array([dx, dy])
+
+        # Firstly finds the sign of the dot product
+        # Sign value (1 or -1) indicates if the robot is going left or right from the path
+        # Lastly we multiply the sign value with the absolute distance 
+        crosstrack_error = np.sign(nearest_path_vector @ front_axle_vector) * abs_distance
+
+        # Calculate the steering angle error (scaled by speed and coefficient)
+        crosstrack_steering_error = np.arctan2((self.k * crosstrack_error), (self.v + self.k_s))
+
+        return crosstrack_steering_error, crosstrack_error
 
     def steering_control(self, current_position, target_position, current_heading, path_heading, target_position_dist): # The steering control is the sum of the heading error correction and the cross-track error correction. 
-        heading_err = self.heading_error(current_heading, path_heading)
+        #Double normalization, check
+        heading_err = self.normalize(self.heading_error(current_heading, path_heading))
+        print(f"Heading error: {np.rad2deg(heading_err)}")
+        #print(f"Robot heading: {current_heading}")
         
-        xt_err = self.xt_error(current_position, target_position, target_position_dist)
+        xt_err, _ = self.xt_error(current_heading, x, y, target_position_dist)
+        
+        #print(f"Cross-track error: {xt_err}")
+        
         self.csv_writer.writerow([current_heading, current_position, target_position, heading_err, xt_err, path_heading, np.rad2deg(heading_err + xt_err)])
         return heading_err + xt_err
 
     def implementation(self):
-        #TODO: implement log file writing.
-        
-        
         #Getting data and updating values:
         #Get path points
         gps_df = pd.read_csv("/home/tera/rosws2/src/gps_data/gps_data/kaitsmine.csv")   
@@ -178,15 +190,18 @@ class StanleyController():
         #Calculate robot centre point heading PROBABLY NEED TO REPLACE WITH FRONT AXLE HEADING
         current_heading = self.normalize(np.arctan2(current_position[1] - self.last_y, current_position[0] - self.last_x))  
         #Calculate the position of the front axle
-        current_position_fr = [[current_position[0] + 0.38 * np.cos(current_heading), current_position[1] + 0.38 * np.sin(current_heading)]]    
+        current_position_fr = [current_position[0] + 0.38 * np.cos(current_heading), current_position[1] + 0.38 * np.sin(current_heading)]  
         #Get target location values(RETURNS: nearest point, previous nearest point, nearest point index, min distance)
-        target_location = self.get_target_location(current_position_fr[0], current_position_fr[1])            
-        nearest_point = target_location[0]                                              
-        self.nearest_point_idx = target_location[2]
+        
+        
+        target_location = self.get_target_location(current_position_fr[0], current_position_fr[1], x, y)                                                          
+        self.nearest_point_idx = target_location[0]
+        nearest_point = [x[self.nearest_point_idx], x[self.nearest_point_idx]]
         min_dist = target_location[3]
         path_yaw = self.path_yaws(x, y)                                                 #Get list of headings of each path point
         target_path_heading = self.normalize(path_yaw[self.nearest_point_idx])                            #Get target locations heading
-        current_heading_fr = self.normalize()
+        current_heading_fr = self.normalize(np.arctan2(current_position_fr[1] - self.prev_pos_fr[1], current_position_fr[0] - self.prev_pos_fr[0]))
+        self.prev_pos_fr = current_position_fr
         
         #print(f"Path yaw len: {len(path_yaw)}")
         self.steering_command = np.rad2deg(np.clip(self.steering_control(current_position_fr, nearest_point, current_heading_fr, target_path_heading, min_dist), -self.max_steer, self.max_steer))
@@ -215,7 +230,7 @@ class StanleyController():
             pub.input([330, 0])
             print("----------------------End of path----------------------")
         else:
-            pub.input([steering, 120])
+            pub.input([steering, 170])
         
         time.sleep(0.2)
         
