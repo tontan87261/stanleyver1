@@ -196,7 +196,7 @@ class StanleyController():
         
         target_location = self.get_target_location(current_position_fr[0], current_position_fr[1], x, y)                                                          
         self.nearest_point_idx = target_location[0]
-        nearest_point = [x[self.nearest_point_idx], x[self.nearest_point_idx]]
+        nearest_point = [x[self.nearest_point_idx], y[self.nearest_point_idx]]
         min_dist = target_location[3]
         path_yaw = self.path_yaws(x, y)                                                 #Get list of headings of each path point
         target_path_heading = self.normalize(path_yaw[self.nearest_point_idx])                            #Get target locations heading
